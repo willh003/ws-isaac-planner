@@ -3,6 +3,8 @@ import numpy as np
 import random
 
 import networkx as nx
+from networkx.generators.classic import empty_graph
+from networkx.classes import set_node_attributes
 import matplotlib.pyplot as plt
 from scipy.stats import qmc
 from scipy.spatial import KDTree
@@ -10,32 +12,48 @@ from scipy.spatial import KDTree
 from ws_isaac_planner.utils import l2_heuristic, PriorityQueue, point_traversibilities, pure_pursuit_step
 
 
-
+MARKER_LEN = 6
 class PlanningAgent:
-    def __init__(self, start, goal, env_dim=[100,100], nodes_in_graph = 5000):
+    def __init__(self, start, goal, env_dim=[100,100], nodes_in_graph = 1, edge_radius =1 ,draw_markers = ''):
         '''
-        start, goal: (x,y) coords
-        env_dim: [x,y] dimension
-        
+        @param start: (x,y) coords
+        @param goal: (x,y) coords
+        @param env_dim: [x,y] dimension
+        @param draw_markers: 'dense', 'sparse', or '' (which won't draw anything)
         '''
 
-        edge_radius = 1.5 * (env_dim[0]*env_dim[1] / nodes_in_graph) # radius in which to connect nodes to each other. In practice, 1.5 works well to make sure it is connected but not too dense
+       # edge_radius =  1.5*(env_dim[0]*env_dim[1] / nodes_in_graph) # radius in which to connect nodes to each other. In practice, 1.5 works well to make sure it is connected but not too dense
         self.graph = EnvironmentGraph(start, goal, env_dim, n_points = nodes_in_graph, edge_radius = edge_radius)
         self.goal = goal
         self.env_dim = env_dim
         self.robot_height = .3
-        
-    def calculate_path(self, pose, edge_eval):
+        self.last_index = 0
+        self.path = None
+        self.draw_markers = draw_markers
+
+        if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
+            self.draw_graph_markers()
+
+    def random_new_goal(self):
+        x = np.random.random()*self.env_dim[0] - self.env_dim[0] // 2
+        y = np.random.random()*self.env_dim[1] - self.env_dim[1] // 2
+        self.update_goal((x, y))
+
+    def update_goal(self, new_goal):
+        print(f'New goal: {new_goal}')
+        self.goal = new_goal
+        self.graph.goal = new_goal
+
+    def calculate_path(self, pose, edge_eval=l2_heuristic):
         '''
-        Given a point cloud and the robot's pose, calculate a path to the target
-        pcl: nx3 numpy array (given n points)
-        pose: tuple of (x, y, z, theta)
+        Given the robot's pose and a function returning the cost, calculate a path to the target
+        arraylike, where first two elements are x,y
         edge_eval: function from two vertices to a cost
         '''
-        x, y, z, theta = pose
+        x = pose[0]
+        y = pose[1]
 
-
-        # replace w_basic with any cost function on two nodes
+        # replace l2_heurisitc with any cost function on two nodes
         try:
             path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, edge_eval)
             #path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, l2_heuristic)
@@ -43,25 +61,37 @@ class PlanningAgent:
             #path = self.graph.lsp((x,y), self.goal, w_basic, prior_edge_cost, select_forward, l2_heuristic)
             # self.next_node = path.pop()
             self.path = path
+            self.last_index = 0
+
+            if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
+                self.replan_markers()
         except:
-            print('No valid path from current loc: defaulting to previous path')
+            print('No path found, reverting to old path')
+
         return self.path
 
-    def calculate_action(self, path, pose, last_index, fwd_vel, look_ahead, pos_margin = 2, algo='pp'):
+    def calculate_action(self, path, pose, fwd_vel, look_ahead, pos_margin = 2, algo='pp'):
         '''
         path: list of tuples corresponding to nodes
-        pose: tuple of (x, y, z, theta)
+        pose: arraylike, where first three elements are x,y, theta
         returns: 3x1 np array, corresopnding to [forward, lateral, rotation] to perform on this timestep
         uses
         '''
-        x, y, _, theta = pose
+        
+        if not path:
+            path = self.calculate_path(pose) # naively calculate path at first
 
+        x = pose[0]
+        y = pose[1]
+        theta = pose[2]
+
+        # if running pure pursuit
         if algo =='pp':
-            return pure_pursuit_step(path, (x, y), 180 - theta * 180 / np.pi, pos_margin=pos_margin, fwd_vel=fwd_vel, lookAheadDis = look_ahead, LFindex = last_index, Kp=.6*fwd_vel)
+            fwd, rot, last_index = pure_pursuit_step(path, (x, y), 180 - theta * 180 / np.pi, pos_margin=pos_margin, fwd_vel=fwd_vel, lookAheadDis = look_ahead, LFindex = self.last_index, Kp=.6*fwd_vel)
+            self.last_index = last_index
+            return [fwd, 0, rot]
         else:
-            cmd = self.naive_cmd_gen(path[1] if len(path) > 1 else path[0], pose, cmd_scale = fwd_vel)
-            return cmd[0], cmd[2], 0
-
+            return self.naive_cmd_gen(path[1] if len(path) > 1 else path[0], pose, cmd_scale = fwd_vel)
 
     def node_of_pose(self, G, pose):
         '''
@@ -69,6 +99,47 @@ class PlanningAgent:
         '''
         (x, y, z, theta) = pose
         return (math.floor(x) if x > 0 else 0, math.floor(y) if y > 0 else 0)
+
+    def draw_graph_markers(self):
+        from omni.isaac.orbit.markers import PointMarker
+        nodes = self.graph.G.nodes
+        self.node_to_idx = {}
+        poses = np.zeros((len(nodes), 3))
+        i=0
+        for node in nodes:
+            poses[i, 0] = node[0]
+            poses[i, 1] = node[1]
+            poses[i, 2] = 0 
+            self.node_to_idx[node] = i
+            i+=1
+        
+        if self.draw_markers == 'sparse':
+            self.markers = PointMarker(f"/World/graph", MARKER_LEN, radius=0.3)
+        else:
+            self.markers = PointMarker(f"/World/graph", len(nodes), radius=0.15)
+            self.markers.set_world_poses(poses)
+
+    def replan_markers(self):
+        path = self.path
+        indices = []
+
+        marker_poses = np.zeros((MARKER_LEN, 3))
+        for i in range(len(path)):
+            node = path[i]
+            if i < 6:
+                marker_poses[i][0] = node[0]
+                marker_poses[i][1] = node[1]
+
+            if node in self.node_to_idx:
+                indices.append(self.node_to_idx[node])
+
+        if self.draw_markers == 'dense':
+            self.markers.set_status(np.array([0]*self.markers.count))        
+            self.markers.set_status(np.array([1]*len(indices)), indices = indices)
+        else:        
+            self.markers.set_world_poses(marker_poses)
+            self.markers.set_status(np.array([1]*MARKER_LEN))  
+
 
 
     def naive_cmd_gen(self, target_node, pose, ref=np.array([1,0]), rot_margin = .2, pos_margin=.5, cmd_scale = .5):
@@ -123,7 +194,8 @@ class EnvironmentGraph:
         self.goal = goal
         self.edge_radius = edge_radius
         
-        self.G = self.construct_halton_graph(env_dim, n_points)
+        self.G = self.construct_lattice_graph(env_dim)
+        #self.G = self.construct_halton_graph(env_dim, n_points)
 
 
     def knn(self, loc, k):
@@ -134,11 +206,78 @@ class EnvironmentGraph:
         loc: (x, y) tuple, coordinates in environment of the node
         neighbors: list[(x,y) tuple], coordinates of neighboring nodes
         '''
+        if len(neighbors) == 0:
+            print('no neighbors found')
         for neighbor in neighbors:
             self.G.add_edge(loc, (self.points[neighbor][0], self.points[neighbor][1]))
 
     def neighbors(self, node):
         return self.G.neighbors(node)
+
+    def triangular_lattice_graph(self, env_dim, periodic=False,with_positions=False,create_using=None):
+
+        n = env_dim[0]
+        m = env_dim[1]
+
+        H = empty_graph(0, create_using)
+        if n == 0 or m == 0:
+            return H
+        if periodic:
+            if n < 5 or m < 3:
+                msg = f"m > 2 and n > 4 required for periodic. m={m}, n={n}"
+                raise Exception(msg)
+
+        N = (n + 1) // 2  # number of nodes in row
+        M = (m + 1) // 2
+        rows = range(-M, M+1)
+        cols = range(-N, N+1)
+        # Make grid
+        H.add_edges_from(((i, j), (i + 1, j)) for j in rows for i in cols[:N])
+        H.add_edges_from(((i, j), (i, j + 1)) for j in rows[:m] for i in cols)
+        # add diagonals
+        H.add_edges_from(((i, j), (i + 1, j + 1)) for j in rows[1:m:2] for i in cols[:N])
+        H.add_edges_from(((i + 1, j), (i, j + 1)) for j in rows[:m:2] for i in cols[:N])
+        # identify boundary nodes if periodic
+        from networkx.algorithms.minors import contracted_nodes
+
+        if periodic is True:
+            for i in cols:
+                H = contracted_nodes(H, (i, 0), (i, m))
+            for j in rows[:m]:
+                H = contracted_nodes(H, (0, j), (N, j))
+        elif n % 2:
+            # remove extra nodes
+            H.remove_nodes_from((N, j) for j in rows[1::2])
+
+        # Add position node attributes
+        if with_positions:
+            ii = (i for i in cols for j in rows)
+            jj = (j for i in cols for j in rows)
+            xx = (0.5 * (j % 2) + i for i in cols for j in rows)
+            h = math.sqrt(3) / 2
+            if periodic:
+                yy = (h * j + 0.01 * i * i for i in cols for j in rows)
+            else:
+                yy = (h * j for i in cols for j in rows)
+            pos = {(i, j): (x, y) for i, j, x, y in zip(ii, jj, xx, yy) if (i, j) in H}
+            set_node_attributes(H, pos, "pos")
+        return H
+
+    def construct_lattice_graph(self, env_dim):
+
+        graph = self.triangular_lattice_graph(env_dim)
+        
+        points = np.zeros((len(graph.nodes),2))
+
+        i=0
+        for x, y in graph.nodes:
+            points[i][0] = x
+            points[i][1] = y
+            i+=1
+        
+        self.tree = KDTree(points)
+        self.points = points
+        return graph
 
     def construct_halton_graph(self,env_dim, n_points):
         '''
@@ -185,11 +324,12 @@ class EnvironmentGraph:
 
         # make sure the current location is in the graph (we could replan from anywhere in the environment)
         if start not in self.G.nodes():
-            self.add_node(start, neighbors = self.tree.query_ball_point(start, self.edge_radius))   
+            self.add_node(start, neighbors = self.tree.query_ball_point(start, self.edge_radius)) 
         if goal not in self.G.nodes():
             self.add_node(goal, neighbors = self.tree.query_ball_point(goal, self.edge_radius))   
-
-        path = nx.astar_path(self.G, start, goal, heuristic=l2_heuristic, weight = lambda v1, v2, attr: cost_fn(v1, v2))
+        path = nx.astar_path(self.G, start, goal, heuristic=l2_heuristic)
+       # path = nx.astar_path(self.G, start, goal, heuristic=l2_heuristic, weight = lambda v1, v2, attr: cost_fn(v1, v2))
+        
         return path
 
     def lsp(self, start, goal, w, w_est, selector, heuristic):
@@ -368,11 +508,10 @@ def test3():
 
 
 
-    planner = PlanningAgent((0,0), (95, 93), [100, 100])
+    planner = PlanningAgent((.4,.3), (7.5,24), env_dim=[50, 50], nodes_in_graph=500)
 
-    path = planner.calculate_path([], (0,0,0,0), l2_heuristic)
+    path = planner.calculate_path([0,0], edge_eval=l2_heuristic)
     print(path)
-
     #G = EnvironmentGraph((0,0), (95, 93), [100, 100], 800, 6)
     #path = G.shortest_path(G.start, G.goal, l2_heuristic, l2_heuristic)
    # print(path)
@@ -380,15 +519,22 @@ def test3():
 
    # path_lsp = G.lsp(G.start, G.goal, w_basic, prior_edge_cost, select_forward, l2_heuristic)
    # print(path_lsp)
-    # edge_path_lsp =  [(path_lsp[n],path_lsp[n+1]) for n in range(len(path_lsp)-1)]
 
-    # pos = {(x,y):(x,y) for x,y in G.G.nodes}
-    # #nx.draw(G,pos,node_color='k')
-    # nx.draw_networkx_nodes(G.G,pos=pos, node_size=25)
-    # nx.draw_networkx_edges(G.G,pos=pos,edgelist=edge_path,edge_color = 'r', width=8)
-    # nx.draw_networkx_edges(G.G,pos=pos,edgelist=edge_path_lsp,edge_color = 'g', width=5)
-    # nx.draw_networkx_edges(G.G,pos=pos,edgelist=G.G.edges,edge_color = 'b', width=1)
-    #plt.show()
+    #nx.draw(G,pos,node_color='k')
+    pos = {(x,y):(x,y) for x,y in planner.graph.G.nodes}
+    nx.draw_networkx_nodes(planner.graph.G,pos=pos, node_size=25)
+
+    #nx.draw_networkx_edges(G.G,pos=pos,edgelist=edge_path_l,edge_color = 'g', width=5)
+    nx.draw_networkx_edges(planner.graph.G,pos=pos,edgelist=planner.graph.G.edges,edge_color = 'b', width=1)
+    try:
+        edge_path =  [(path[n],path[n+1]) for n in range(len(path)-1)]
+
+
+        nx.draw_networkx_edges(planner.graph.G,pos=pos,edgelist=edge_path,edge_color = 'r', width=8)
+    except:
+        print('fail')
+
+    plt.show()
 
 
 if __name__ == '__main__':
