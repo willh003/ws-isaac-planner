@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import qmc
 from scipy.spatial import KDTree
 
-from utils import l2_heuristic, PriorityQueue, point_traversibilities
-from utils import pure_pursuit_step
+from ws_isaac_planner.utils import l2_heuristic, PriorityQueue, point_traversibilities, pure_pursuit_step
 
 
 
