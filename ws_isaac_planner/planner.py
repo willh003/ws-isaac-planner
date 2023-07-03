@@ -12,9 +12,9 @@ from scipy.spatial import KDTree
 from ws_isaac_planner.utils import l2_heuristic, PriorityQueue, point_traversibilities, pure_pursuit_step
 
 
-MARKER_LEN = 6
+MARKER_LEN = 12
 class PlanningAgent:
-    def __init__(self, start, goal, env_dim=[100,100], nodes_in_graph = 1, edge_radius =1 ,draw_markers = ''):
+    def __init__(self, start, goal, env_dim=[100,100], nodes_in_graph = 1, edge_radius = 2 ,draw_markers = ''):
         '''
         @param start: (x,y) coords
         @param goal: (x,y) coords
@@ -30,17 +30,32 @@ class PlanningAgent:
         self.last_index = 0
         self.path = None
         self.draw_markers = draw_markers
+        self._rng = np.random.default_rng()
+
 
         if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
             self.draw_graph_markers()
 
-    def random_new_goal(self):
-        x = np.random.random()*self.env_dim[0] - self.env_dim[0] // 2
-        y = np.random.random()*self.env_dim[1] - self.env_dim[1] // 2
-        self.update_goal((x, y))
+    def _randint(self, low, high):
+        '''
+        return a random integer in [low, high)
+        '''
+        range = high - low
+        return math.floor(self._rng.random() * range + low)
+
+    def random_new_goal(self, margin = 5):
+        x = self.env_dim[0] // 2
+        y = self.env_dim[1] // 2
+
+        potential_goals = [(self._randint(-x, x), self._randint(y-margin,y)), (self._randint(x-margin, x), 
+        self._randint(-y,y)), (self._randint(-x, -x + margin), self._randint(-y,y)), (self._randint(-x, x), self._randint(-y,-y+margin))]
+        new_goal = potential_goals[self._randint(0,3)]
+
+        self.update_goal(new_goal)
 
     def update_goal(self, new_goal):
         print(f'New goal: {new_goal}')
+
         self.goal = new_goal
         self.graph.goal = new_goal
 
@@ -55,7 +70,9 @@ class PlanningAgent:
 
         # replace l2_heurisitc with any cost function on two nodes
         try:
+            #other_path = self.graph.shortest_path((1,4), self.goal, l2_heuristic, edge_eval)
             path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, edge_eval)
+
             #path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, l2_heuristic)
             # lsp not working for some reason, but whatever
             #path = self.graph.lsp((x,y), self.goal, w_basic, prior_edge_cost, select_forward, l2_heuristic)
@@ -124,9 +141,10 @@ class PlanningAgent:
         indices = []
 
         marker_poses = np.zeros((MARKER_LEN, 3))
+
         for i in range(len(path)):
             node = path[i]
-            if i < 6:
+            if i < MARKER_LEN:
                 marker_poses[i][0] = node[0]
                 marker_poses[i][1] = node[1]
 
@@ -206,13 +224,48 @@ class EnvironmentGraph:
         loc: (x, y) tuple, coordinates in environment of the node
         neighbors: list[(x,y) tuple], coordinates of neighboring nodes
         '''
-        if len(neighbors) == 0:
-            print('no neighbors found')
         for neighbor in neighbors:
             self.G.add_edge(loc, (self.points[neighbor][0], self.points[neighbor][1]))
 
     def neighbors(self, node):
         return self.G.neighbors(node)
+
+    def tri_lattice_2(self, env_dim):
+        x_min, x_max = -env_dim[0] // 2, env_dim[0] // 2
+        y_min, y_max = -env_dim[1] // 2, env_dim[1] // 2
+
+        # Define the spacing between the lattice points
+        spacing = 1
+
+        # Calculate the number of points along x and y axes
+        num_points_x = int((x_max - x_min) / spacing)
+        num_points_y = int((y_max - y_min) / spacing)
+
+        # Create an empty graph
+        G = empty_graph(0)
+
+        # Generate lattice points and add them as nodes to the graph
+        for i in range(num_points_x):
+            for j in range(num_points_y):
+                x = x_min + i * spacing
+                y = y_min + j * spacing
+                G.add_node((x, y))
+
+        # Connect the lattice points to form the triangular lattice
+        for i in range(num_points_x - 1):
+            for j in range(num_points_y - 1):
+                x = x_min + i * spacing
+                y = y_min + j * spacing
+
+                G.add_edge((x, y), (x + spacing, y + spacing))
+                G.add_edge((x, y), (x + spacing, y - spacing))
+                G.add_edge((x, y), (x - spacing, y + spacing))
+                G.add_edge((x, y), (x - spacing, y - spacing))
+                G.add_edge((x,y), (x, y + spacing))
+                G.add_edge((x,y), (x+spacing, y))
+
+        return G
+
 
     def triangular_lattice_graph(self, env_dim, periodic=False,with_positions=False,create_using=None):
 
@@ -265,7 +318,7 @@ class EnvironmentGraph:
 
     def construct_lattice_graph(self, env_dim):
 
-        graph = self.triangular_lattice_graph(env_dim)
+        graph = self.tri_lattice_2(env_dim)
         
         points = np.zeros((len(graph.nodes),2))
 
@@ -324,11 +377,24 @@ class EnvironmentGraph:
 
         # make sure the current location is in the graph (we could replan from anywhere in the environment)
         if start not in self.G.nodes():
-            self.add_node(start, neighbors = self.tree.query_ball_point(start, self.edge_radius)) 
+            start_neighbors = self.tree.query_ball_point(start, self.edge_radius)
+            if len(start_neighbors) == 0:
+                print('no start neighbors found')
+            self.add_node(start, neighbors = start_neighbors) 
         if goal not in self.G.nodes():
-            self.add_node(goal, neighbors = self.tree.query_ball_point(goal, self.edge_radius))   
-        path = nx.astar_path(self.G, start, goal, heuristic=l2_heuristic)
-       # path = nx.astar_path(self.G, start, goal, heuristic=l2_heuristic, weight = lambda v1, v2, attr: cost_fn(v1, v2))
+            if len(start_neighbors) == 0:
+                print('no goal neighbors found')
+            goal_neighbors = self.tree.query_ball_point(goal, self.edge_radius)
+            self.add_node(goal, neighbors = goal_neighbors) 
+
+        # pos = {(x,y):(x,y) for x,y in self.G.nodes}
+        # nx.draw_networkx_nodes(self.G,pos=pos, node_size=25)
+
+        # #nx.draw_networkx_edges(G.G,pos=pos,edgelist=edge_path_l,edge_color = 'g', width=5)
+        # nx.draw_networkx_edges(self.G,pos=pos,edgelist=self.G.edges,edge_color = 'b', width=1)
+        # plt.savefig('graph.png')
+
+        path = nx.astar_path(self.G, start, goal, heuristic=heuristic, weight = lambda v1, v2, attr: cost_fn(v1, v2))
         
         return path
 
@@ -511,7 +577,7 @@ def test3():
     planner = PlanningAgent((.4,.3), (7.5,24), env_dim=[50, 50], nodes_in_graph=500)
 
     path = planner.calculate_path([0,0], edge_eval=l2_heuristic)
-    print(path)
+
     #G = EnvironmentGraph((0,0), (95, 93), [100, 100], 800, 6)
     #path = G.shortest_path(G.start, G.goal, l2_heuristic, l2_heuristic)
    # print(path)
