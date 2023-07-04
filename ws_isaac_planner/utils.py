@@ -1,12 +1,8 @@
 import numpy as np
 import heapq
 import math
-import pickle
 from scipy.spatial import KDTree
-import typing
-from PIL import Image
-import os
-import sys
+from networkx.generators.classic import empty_graph
 
 ########################## Robot Utils #######################
 
@@ -56,12 +52,21 @@ def reached_goal(mem_queue, goal, pos_margin):
         if np.linalg.norm(np.array(goal) - xy_loc) < pos_margin: 
             print('Reached goal; resetting')
             return True
-
-
+        
     return False 
 
 def node_path_to_edge_path(path):
     return [(path[n],path[n+1]) for n in range(len(path)-1)]
+
+def forward_cmd(scale):
+    return np.array([scale, 0, 0])
+
+def rotate_cmd(direction, scale):
+    # direction is 1 for counterclockwise, -1 for clockwise 
+    return np.array([scale, 0, direction * scale])
+
+def empty_cmd():
+    return np.array([0, 0, 0])
 
 def pure_pursuit_step(path, currentPos, currentHeading, pos_margin = 2, fwd_vel = .5, lookAheadDis=10, LFindex=0, Kp = .5):
   '''
@@ -80,7 +85,6 @@ def pure_pursuit_step(path, currentPos, currentHeading, pos_margin = 2, fwd_vel 
 
   if np.pi * ((path[-1][0] - currentX)**2 + (path[-1][0] - currentY) ** 2) < pos_margin:
     return 0, 0, 0 
-
 
   # use for loop to search intersections
   lastFoundIndex = LFindex
@@ -161,7 +165,6 @@ def pure_pursuit_step(path, currentPos, currentHeading, pos_margin = 2, fwd_vel 
 
   # obtained goal point, now compute turn vel
 
-
   # calculate absTargetAngle with the atan2 function
   absTargetAngle = math.atan2 (goalPt[1]-currentPos[1], goalPt[0]-currentPos[0]) *180/np.pi
   if absTargetAngle < 0: absTargetAngle += 360
@@ -176,22 +179,6 @@ def pure_pursuit_step(path, currentPos, currentHeading, pos_margin = 2, fwd_vel 
   turnVel = Kp*turnError
   
   return fwd_vel, turnVel, lastFoundIndex
-
-def naive_edge_cost(v1, v2, pcl, robot_height):
-    '''
-    Evaluate the traversability of the edge (v1, v2) based on the density of points in front of the robot along that edge
-    '''
-
-    ahead = np.array([v2[0] - v1[0], v2[1] - v1[0], 0])
-    if ahead[0] == 0 and ahead[1] == 0:
-        return 0
-    ahead = ahead / np.linalg.norm(ahead)
-
-    up = np.array([0.0, 0.0, 1.0])
-    pos = np.array([v1[0], v1[1], robot_height]) # should z coord be the robot height or 0?
-    troublemakers = point_traversibilities(pcl, pos, ahead, up, robot_height=robot_height)
-    return sum(troublemakers) # cost is just the number of points that are a problem. All edges are the same distance, so that isn't a problem
-    
 
 def point_traversibilities(points, pos, ahead, up, robot_height=0.3, ahead_tolerance=1, width_tolerance=0.5, height_tolerance=0.3) -> bool :
     '''Determines whether the robot may move forward (whether there is an obstacle within ahead_tolerance of its path)
@@ -249,7 +236,6 @@ class PriorityQueue:
     def get(self):
         return heapq.heappop(self.elements)[1]
 
-    
 def stack_if_exists(arr1, arr2, orientation):
     try:
         if orientation == 'h':
@@ -272,8 +258,74 @@ def concat_if_exists(arr1, arr2, axis=None):
         # arr1 does not exist
         return arr2
 
+################# Edge Costs ####################
+def cost_from_grid(edge, grid, grid_transform):
+    '''
+    grid_transform: tuple(2) -> tuple(2): a function from world coordinates to grid indices
+    '''
+    v1, v2 = edge
+    c1, c2 = grid_transform(v1), grid_transform(v2)
+    i1, j1 = c1
+    i2, j2 = c2
+
+    cells = bresenham_line(i1, j1, i2, j2)
+    total_cost = sum([grid[i][j] for i, j in cells])
+    return total_cost / len(cells)
+
+def naive_edge_cost(v1, v2, pcl, robot_height):
+    '''
+    Evaluate the traversability of the edge (v1, v2) based on the density of points in front of the robot along that edge
+    '''
+
+    ahead = np.array([v2[0] - v1[0], v2[1] - v1[0], 0])
+    if ahead[0] == 0 and ahead[1] == 0:
+        return 0
+    ahead = ahead / np.linalg.norm(ahead)
+
+    up = np.array([0.0, 0.0, 1.0])
+    pos = np.array([v1[0], v1[1], robot_height]) # should z coord be the robot height or 0?
+    troublemakers = point_traversibilities(pcl, pos, ahead, up, robot_height=robot_height)
+    return sum(troublemakers) # cost is just the number of points that are a problem. All edges are the same distance, so that isn't a problem
+    
 
 ################################ Math Utils ###################################
+
+def generator_randint(low, high, rng):
+    '''
+    return a random integer in [low, high)
+    '''
+    range = high - low
+    return math.floor(rng.random() * range + low)
+
+def bresenham_line(x0,y0,x1,y1):
+    '''
+    all params must be integers
+    returns the grid cells intersected by a line through the coordinates given by (x0,y0), (x1, y1)
+    '''
+    dx = abs(x1 - x0)
+    sx =  1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    error = dx + dy
+    
+    out = []
+
+    while True:
+        out.append((x0, y0))
+        if x0 == x1 and y0 == y1:
+           return out
+        e2 = 2 * error
+        if e2 >= dy:
+            if x0 == x1:
+                return out
+            error = error + dy
+            x0 = x0 + sx
+        if e2 <= dx:
+            if y0 == y1:
+               return out
+            error = error + dx
+            y0 = y0 + sy
+
 def l2_heuristic(a, b, w=0):
     (x1, y1) = a
     (x2, y2) = b
@@ -300,6 +352,42 @@ def euler_of_quat(quats):
     
 
     return roll_x, pitch_y, yaw_z # in degrees
+
+def triangular_lattice_graph(env_dim):
+    x_min, x_max = -env_dim[0] // 2, env_dim[0] // 2
+    y_min, y_max = -env_dim[1] // 2, env_dim[1] // 2
+
+    # Define the spacing between the lattice points
+    spacing = 1
+
+    # Calculate the number of points along x and y axes
+    num_points_x = int((x_max - x_min) / spacing)
+    num_points_y = int((y_max - y_min) / spacing)
+
+    # Create an empty graph
+    G = empty_graph(0)
+
+    # Generate lattice points and add them as nodes to the graph
+    for i in range(num_points_x):
+        for j in range(num_points_y):
+            x = x_min + i * spacing
+            y = y_min + j * spacing
+            G.add_node((x, y))
+
+    # Connect the lattice points to form the triangular lattice
+    for i in range(num_points_x - 1):
+        for j in range(num_points_y - 1):
+            x = x_min + i * spacing
+            y = y_min + j * spacing
+
+            G.add_edge((x, y), (x + spacing, y + spacing))
+            G.add_edge((x, y), (x + spacing, y - spacing))
+            G.add_edge((x, y), (x - spacing, y + spacing))
+            G.add_edge((x, y), (x - spacing, y - spacing))
+            G.add_edge((x,y), (x, y + spacing))
+            G.add_edge((x,y), (x+spacing, y))
+
+    return G
 
 def rot_matrix_of_euler(xtheta, ytheta, ztheta):
 
@@ -335,14 +423,12 @@ def quat_of_euler(roll, pitch, yaw):
     
     return (qx, qy, qz, qw)
 
-
-# helper functions
 def pt_to_pt_distance (pt1,pt2):
     distance = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
     return distance
 
-# returns -1 if num is negative, 1 otherwise
-def sgn (num):
+
+def sgn(num):
   if num >= 0:
     return 1
   else:
@@ -350,6 +436,7 @@ def sgn (num):
 
 
 ############################### Other ################################
+
 def unique_name(filename, file_counts):
         '''
         create a prim reference that is not in the set of existing references

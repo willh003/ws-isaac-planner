@@ -1,15 +1,10 @@
-import math
-import numpy as np
-import random
 
+import numpy as np
 import networkx as nx
-from networkx.generators.classic import empty_graph
-from networkx.classes import set_node_attributes
 import matplotlib.pyplot as plt
 from scipy.stats import qmc
 from scipy.spatial import KDTree
-
-from ws_isaac_planner.utils import l2_heuristic, PriorityQueue, point_traversibilities, pure_pursuit_step
+from ws_isaac_planner.utils import *
 
 
 MARKER_LEN = 12
@@ -36,28 +31,22 @@ class PlanningAgent:
         if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
             self.draw_graph_markers()
 
-    def _randint(self, low, high):
-        '''
-        return a random integer in [low, high)
-        '''
-        range = high - low
-        return math.floor(self._rng.random() * range + low)
 
     def random_new_goal(self, margin = 5):
         x = self.env_dim[0] // 2
         y = self.env_dim[1] // 2
 
-        potential_goals = [(self._randint(-x, x), self._randint(y-margin,y)), (self._randint(x-margin, x), 
-        self._randint(-y,y)), (self._randint(-x, -x + margin), self._randint(-y,y)), (self._randint(-x, x), self._randint(-y,-y+margin))]
-        new_goal = potential_goals[self._randint(0,3)]
-
-        self.update_goal(new_goal)
-
-    def update_goal(self, new_goal):
-        print(f'New goal: {new_goal}')
+        potential_goals = [(generator_randint(-x, x, self._rng), generator_randint(y-margin,y, self._rng)), 
+                           (generator_randint(x-margin, x, self._rng), generator_randint(-y,y, self._rng)), 
+                           (generator_randint(-x, -x + margin, self._rng), generator_randint(-y,y, self._rng)), 
+                            (generator_randint(-x, x, self._rng), generator_randint(-y,-y+margin, self._rng))]
+        
+        new_goal = potential_goals[generator_randint(0,3, self._rng)]
 
         self.goal = new_goal
         self.graph.goal = new_goal
+
+        print(f'New goal: {new_goal}')
 
     def calculate_path(self, pose, edge_eval=l2_heuristic):
         '''
@@ -68,15 +57,8 @@ class PlanningAgent:
         x = pose[0]
         y = pose[1]
 
-        # replace l2_heurisitc with any cost function on two nodes
         try:
-            #other_path = self.graph.shortest_path((1,4), self.goal, l2_heuristic, edge_eval)
             path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, edge_eval)
-
-            #path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, l2_heuristic)
-            # lsp not working for some reason, but whatever
-            #path = self.graph.lsp((x,y), self.goal, w_basic, prior_edge_cost, select_forward, l2_heuristic)
-            # self.next_node = path.pop()
             self.path = path
             self.last_index = 0
 
@@ -109,13 +91,6 @@ class PlanningAgent:
             return [fwd, 0, rot]
         else:
             return self.naive_cmd_gen(path[1] if len(path) > 1 else path[0], pose, cmd_scale = fwd_vel)
-
-    def node_of_pose(self, G, pose):
-        '''
-        returns the lower left corner of the robot's current grid cell
-        '''
-        (x, y, z, theta) = pose
-        return (math.floor(x) if x > 0 else 0, math.floor(y) if y > 0 else 0)
 
     def draw_graph_markers(self):
         from omni.isaac.orbit.markers import PointMarker
@@ -158,16 +133,18 @@ class PlanningAgent:
             self.markers.set_world_poses(marker_poses)
             self.markers.set_status(np.array([1]*MARKER_LEN))  
 
-
-
     def naive_cmd_gen(self, target_node, pose, ref=np.array([1,0]), rot_margin = .2, pos_margin=.5, cmd_scale = .5):
-        '''given a target node, navigate to the node and face that direction
-        - rotate until facing the target
-        - walk straight in the direction of the target
-        ref is the vector corresponding to 0 degree rotation
-        rot_margin is the margin of error for the direction of motion (radians)
-        pos_margin is the margin of error for the position
         '''
+        @param ref: the vector corresponding to 0 degree rotation
+        @param rot_margin: the margin of error for the direction of motion (radians)
+        @param pos_margin: the margin of error for the position
+        
+        given a target node:
+            navigate to the node and face that direction
+            rotate until facing the target
+            walk straight in the direction of the target
+        '''
+    
         (x, y, z, theta) = pose
         (xt, yt) = target_node
         pose_to_target = [xt - x, yt-y]
@@ -177,31 +154,18 @@ class PlanningAgent:
         d_theta = np.arccos(np.clip(np.dot(pose_to_target , pose_vector) / 
                                         ( np.linalg.norm(pose_to_target) * np.linalg.norm(pose_vector)), -1.0, 1.0))
 
-        # print(pose_to_target / np.linalg.norm(pose_to_target))
-        # print(pose_vector / np.linalg.norm(pose_vector))
-        # print(d_theta)
-
         if np.pi * ((xt - x)**2 + (yt - y) ** 2) < pos_margin:
             # if already at n2, pop n1 from path
             self.path = self.path[1:] if len(self.path) > 1 else self.path
-            return self.empty_cmd()
+            return empty_cmd()
         elif d_theta < rot_margin:
 
             # if pointing towards n2 but not at n2, go forwards
-            return self.forward_cmd(cmd_scale)
+            return forward_cmd(cmd_scale)
         else:
             # if not pointing towards n2 and not at n2, rotate to face towards n2
-            return self.rotate_cmd(d_dir, cmd_scale)
+            return rotate_cmd(d_dir, cmd_scale)
 
-    def forward_cmd(self, scale):
-        return np.array([scale, 0, 0])
-
-    def rotate_cmd(self, direction, scale):
-        # direction is 1 for counterclockwise, -1 for clockwise 
-        return np.array([scale, 0, direction * scale])
-
-    def empty_cmd(self):
-        return np.array([0, 0, 0])
 
 
 class EnvironmentGraph:
@@ -210,11 +174,9 @@ class EnvironmentGraph:
         self.tree = None
         self.start = start
         self.goal = goal
-        self.edge_radius = edge_radius
+        self.edge_radius = edge_radius # radius in which to add neighbors to a new node
         
         self.G = self.construct_lattice_graph(env_dim)
-        #self.G = self.construct_halton_graph(env_dim, n_points)
-
 
     def knn(self, loc, k):
         return self.tree.query(loc, k)
@@ -230,95 +192,9 @@ class EnvironmentGraph:
     def neighbors(self, node):
         return self.G.neighbors(node)
 
-    def tri_lattice_2(self, env_dim):
-        x_min, x_max = -env_dim[0] // 2, env_dim[0] // 2
-        y_min, y_max = -env_dim[1] // 2, env_dim[1] // 2
-
-        # Define the spacing between the lattice points
-        spacing = 1
-
-        # Calculate the number of points along x and y axes
-        num_points_x = int((x_max - x_min) / spacing)
-        num_points_y = int((y_max - y_min) / spacing)
-
-        # Create an empty graph
-        G = empty_graph(0)
-
-        # Generate lattice points and add them as nodes to the graph
-        for i in range(num_points_x):
-            for j in range(num_points_y):
-                x = x_min + i * spacing
-                y = y_min + j * spacing
-                G.add_node((x, y))
-
-        # Connect the lattice points to form the triangular lattice
-        for i in range(num_points_x - 1):
-            for j in range(num_points_y - 1):
-                x = x_min + i * spacing
-                y = y_min + j * spacing
-
-                G.add_edge((x, y), (x + spacing, y + spacing))
-                G.add_edge((x, y), (x + spacing, y - spacing))
-                G.add_edge((x, y), (x - spacing, y + spacing))
-                G.add_edge((x, y), (x - spacing, y - spacing))
-                G.add_edge((x,y), (x, y + spacing))
-                G.add_edge((x,y), (x+spacing, y))
-
-        return G
-
-
-    def triangular_lattice_graph(self, env_dim, periodic=False,with_positions=False,create_using=None):
-
-        n = env_dim[0]
-        m = env_dim[1]
-
-        H = empty_graph(0, create_using)
-        if n == 0 or m == 0:
-            return H
-        if periodic:
-            if n < 5 or m < 3:
-                msg = f"m > 2 and n > 4 required for periodic. m={m}, n={n}"
-                raise Exception(msg)
-
-        N = (n + 1) // 2  # number of nodes in row
-        M = (m + 1) // 2
-        rows = range(-M, M+1)
-        cols = range(-N, N+1)
-        # Make grid
-        H.add_edges_from(((i, j), (i + 1, j)) for j in rows for i in cols[:N])
-        H.add_edges_from(((i, j), (i, j + 1)) for j in rows[:m] for i in cols)
-        # add diagonals
-        H.add_edges_from(((i, j), (i + 1, j + 1)) for j in rows[1:m:2] for i in cols[:N])
-        H.add_edges_from(((i + 1, j), (i, j + 1)) for j in rows[:m:2] for i in cols[:N])
-        # identify boundary nodes if periodic
-        from networkx.algorithms.minors import contracted_nodes
-
-        if periodic is True:
-            for i in cols:
-                H = contracted_nodes(H, (i, 0), (i, m))
-            for j in rows[:m]:
-                H = contracted_nodes(H, (0, j), (N, j))
-        elif n % 2:
-            # remove extra nodes
-            H.remove_nodes_from((N, j) for j in rows[1::2])
-
-        # Add position node attributes
-        if with_positions:
-            ii = (i for i in cols for j in rows)
-            jj = (j for i in cols for j in rows)
-            xx = (0.5 * (j % 2) + i for i in cols for j in rows)
-            h = math.sqrt(3) / 2
-            if periodic:
-                yy = (h * j + 0.01 * i * i for i in cols for j in rows)
-            else:
-                yy = (h * j for i in cols for j in rows)
-            pos = {(i, j): (x, y) for i, j, x, y in zip(ii, jj, xx, yy) if (i, j) in H}
-            set_node_attributes(H, pos, "pos")
-        return H
-
     def construct_lattice_graph(self, env_dim):
 
-        graph = self.tri_lattice_2(env_dim)
+        graph = triangular_lattice_graph(env_dim)
         
         points = np.zeros((len(graph.nodes),2))
 
