@@ -65,6 +65,7 @@ class PlanningAgent:
             if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
                 self.replan_markers()
         except:
+            # networkx raises an error if no path can be found
             print('No path found, reverting to old path')
 
         return self.path

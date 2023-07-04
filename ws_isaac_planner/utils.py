@@ -259,18 +259,7 @@ def concat_if_exists(arr1, arr2, axis=None):
         return arr2
 
 ################# Edge Costs ####################
-def cost_from_grid(edge, grid, grid_transform):
-    '''
-    grid_transform: tuple(2) -> tuple(2): a function from world coordinates to grid indices
-    '''
-    v1, v2 = edge
-    c1, c2 = grid_transform(v1), grid_transform(v2)
-    i1, j1 = c1
-    i2, j2 = c2
 
-    cells = bresenham_line(i1, j1, i2, j2)
-    total_cost = sum([grid[i][j] for i, j in cells])
-    return total_cost / len(cells)
 
 def naive_edge_cost(v1, v2, pcl, robot_height):
     '''
@@ -296,35 +285,6 @@ def generator_randint(low, high, rng):
     '''
     range = high - low
     return math.floor(rng.random() * range + low)
-
-def bresenham_line(x0,y0,x1,y1):
-    '''
-    all params must be integers
-    returns the grid cells intersected by a line through the coordinates given by (x0,y0), (x1, y1)
-    '''
-    dx = abs(x1 - x0)
-    sx =  1 if x0 < x1 else -1
-    dy = -abs(y1 - y0)
-    sy = 1 if y0 < y1 else -1
-    error = dx + dy
-    
-    out = []
-
-    while True:
-        out.append((x0, y0))
-        if x0 == x1 and y0 == y1:
-           return out
-        e2 = 2 * error
-        if e2 >= dy:
-            if x0 == x1:
-                return out
-            error = error + dy
-            x0 = x0 + sx
-        if e2 <= dx:
-            if y0 == y1:
-               return out
-            error = error + dx
-            y0 = y0 + sy
 
 def l2_heuristic(a, b, w=0):
     (x1, y1) = a
