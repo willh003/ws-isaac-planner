@@ -276,7 +276,35 @@ def cost_from_grid(edge, grid, grid_transform):
     total_cost = sum([grid[i][j] for i, j in cells])
     return total_cost / len(cells)
 
+def bresenham_line(x0,y0,x1,y1):
+    '''
+    all params must be integers
+    @return: the grid cells intersected by a line through the coordinates given by (x0,y0), (x1, y1)
+    '''
+    dx = abs(x1 - x0)
+    sx =  1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    error = dx + dy
+    
+    out = []
 
+    while True:
+        out.append((x0, y0))
+        if x0 == x1 and y0 == y1:
+           return out
+        e2 = 2 * error
+        if e2 >= dy:
+            if x0 == x1:
+                return out
+            error = error + dy
+            x0 = x0 + sx
+        if e2 <= dx:
+            if y0 == y1:
+               return out
+            error = error + dx
+            y0 = y0 + sy
+            
 def naive_edge_cost(v1, v2, pcl, robot_height):
     '''
     Evaluate the traversability of the edge (v1, v2) based on the density of points in front of the robot along that edge
