@@ -260,6 +260,22 @@ def concat_if_exists(arr1, arr2, axis=None):
 
 ################# Edge Costs ####################
 
+def cost_from_grid(edge, grid, grid_transform):
+    '''
+    @param edge: (tuple(2), tuple(2))
+    @param grid: array-like, 2 dimensional
+    @param grid_transform: tuple(2) -> tuple(2): 
+    a function from world coordinates to grid indices
+    '''
+    v1, v2 = edge
+    c1, c2 = grid_transform(v1), grid_transform(v2)
+    i1, j1 = c1
+    i2, j2 = c2
+
+    cells = bresenham_line(i1, j1, i2, j2)
+    total_cost = sum([grid[i][j] for i, j in cells])
+    return total_cost / len(cells)
+
 
 def naive_edge_cost(v1, v2, pcl, robot_height):
     '''

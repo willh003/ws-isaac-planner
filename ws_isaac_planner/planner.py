@@ -1,5 +1,6 @@
 
 import numpy as np
+import torch
 import networkx as nx
 import matplotlib.pyplot as plt
 from scipy.stats import qmc
@@ -9,27 +10,76 @@ from ws_isaac_planner.utils import *
 
 MARKER_LEN = 12
 class PlanningAgent:
-    def __init__(self, start, goal, env_dim=[100,100], nodes_in_graph = 1, edge_radius = 2 ,draw_markers = ''):
+    def __init__(self, start, goal, env_dim=[100,100], map_resolution = 4, edge_radius = 2 ,draw_markers = ''):
         '''
-        @param start: (x,y) coords
-        @param goal: (x,y) coords
-        @param env_dim: [x,y] dimension
-        @param draw_markers: 'dense', 'sparse', or '' (which won't draw anything)
+            start: (x,y) coords
+            
+            goal: (x,y) coords
+            
+            env_dim: [x,y] dimension of world
+
+            map_resolution: cells in map per unit length in the world 
+            
+            edge_radius: radius in which to connect neighbors to new nodes in the graph (too small will cause errors)
+
+            draw_markers: 'dense', 'sparse', or '' (which won't draw anything)
         '''
 
-       # edge_radius =  1.5*(env_dim[0]*env_dim[1] / nodes_in_graph) # radius in which to connect nodes to each other. In practice, 1.5 works well to make sure it is connected but not too dense
-        self.graph = EnvironmentGraph(start, goal, env_dim, n_points = nodes_in_graph, edge_radius = edge_radius)
+        # 2D lattice graph with a node every unit length in the world
+        self.graph = EnvironmentGraph(start, goal, env_dim, edge_radius = edge_radius)
+        
+        # traversability map, starts at 1 everywhere so it is optimistic (encourages exploration)
+        self.global_map = torch.ones(env_dim[0] * map_resolution, env_dim[1] * map_resolution) 
+        self.map_resolution = map_resolution
+
         self.goal = goal
         self.env_dim = env_dim
-        self.robot_height = .3
         self.last_index = 0
         self.path = None
         self.draw_markers = draw_markers
         self._rng = np.random.default_rng()
 
-
         if self.draw_markers == 'dense' or self.draw_markers == 'sparse':
             self.draw_graph_markers()
+
+    def update_global_map(self, trav, pixels_in_world, method = 'exp', alpha=.8):
+        '''
+        Inputs:
+            trav: torch.tensor, shape (height, width), representing traversability signal from model
+
+            pixels_in_world: torch.tensor, shape (3,height, width), such that pixels_in_world[:,i,j] is the xyz coords of pixel i,j 
+
+            method: 'exp' or 'recent'. Specifies the method for handling map collisions. exp uses an exponential moving average 
+
+            alpha: specifies the amount to weigh the most recent observation by for exponential averaging
+        Behavior:
+            sets global map traversabilities according to coordinates and method
+        '''
+        trav= trav.to('cpu')
+        pixels_in_world = pixels_in_world.to('cpu').long()
+
+        
+        x_coordinates = pixels_in_world[0, :, :]
+        y_coordinates = pixels_in_world[1, :, :]
+        z_coordinates = pixels_in_world[2, :, :]
+
+        x_bound = self.env_dim[0]
+        y_bound = self.env_dim[1]
+
+
+        bound_mask = (x_coordinates < -x_bound) | (x_coordinates > x_bound) | (y_coordinates < -y_bound) | (y_coordinates > y_bound)
+        nan_mask = torch.isnan(x_coordinates) | torch.isnan(y_coordinates) | torch.isnan(z_coordinates)
+        good_pts = ~(bound_mask | nan_mask)
+        
+        x_coordinates = x_coordinates[good_pts]
+        y_coordinates = y_coordinates[good_pts]
+
+        trav_inbounds = trav[good_pts]
+
+        if method == 'exp':
+            self.global_map[x_coordinates, y_coordinates] = alpha * trav_inbounds + (1-alpha) * self.global_map[x_coordinates, y_coordinates]
+        elif method == 'recent':
+            self.global_map[x_coordinates, y_coordinates] = trav
 
 
     def random_new_goal(self, margin = 5):
@@ -48,14 +98,23 @@ class PlanningAgent:
 
         print(f'New goal: {new_goal}')
 
-    def calculate_path(self, pose, edge_eval=l2_heuristic):
+    def calculate_path(self, pose, edge_method='l2'):
         '''
         Given the robot's pose and a function returning the cost, calculate a path to the target
         arraylike, where first two elements are x,y
-        edge_eval: function from two vertices to a cost
+        edge_method: method for evaluating edges. 'l2' for euclidean distance, 'trav-map' for traversability map
         '''
         x = pose[0]
         y = pose[1]
+
+        if edge_method == 'l2':
+            edge_eval = l2_heuristic
+        elif edge_method == 'trav-map':
+            def edge_eval(v1, v2):
+                return cost_from_grid((v1,v2), self.global_map, 
+                               lambda loc: (int(loc[0] * self.map_resolution), int(loc[1] * self.map_resolution)))
+        else:
+            raise Exception(f'invalid argument for edge_method {edge_method}')
 
         try:
             path = self.graph.shortest_path((x,y), self.goal, l2_heuristic, edge_eval)
@@ -72,10 +131,14 @@ class PlanningAgent:
 
     def calculate_action(self, path, pose, fwd_vel, look_ahead, pos_margin = 2, algo='pp'):
         '''
-        path: list of tuples corresponding to nodes
-        pose: arraylike, where first three elements are x,y, theta
-        returns: 3x1 np array, corresopnding to [forward, lateral, rotation] to perform on this timestep
-        uses
+        Inputs:
+            path: list of tuples corresponding to nodes
+        
+            pose: arraylike, where first three elements are x,y, theta
+            
+        Returns: 
+            3x1 np array, corresopnding to [forward, lateral, rotation] to perform on this timestep
+        
         '''
         
         if not path:
@@ -170,7 +233,7 @@ class PlanningAgent:
 
 
 class EnvironmentGraph:
-    def __init__(self, start, goal, env_dim, n_points, edge_radius):
+    def __init__(self, start, goal, env_dim, edge_radius):
         self.adj_list = {}
         self.tree = None
         self.start = start
@@ -358,19 +421,6 @@ def astar_tuple(G, start, goal, heuristic, cost):
 
 
 ############################################# LSP, Spline (extensions) ################################################
-
-def spline_cmd_gen(n1, n2, pose):
-    '''
-    given start node, end node, and pose
-    sample a node n3 in a straight line from the pose (or maybe a few nodes)
-    generate a spline using n1, n2 and n3
-    travel a small distance along the spline
-        - let current pose by v
-        - find its gradient g
-        - let rot = k*(g-v)
-        - otherwise, just use forward command
-    recompute
-    '''
 
 
 def already_evaluated(path, E_eval):
